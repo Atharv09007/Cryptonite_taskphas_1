@@ -1,0 +1,135 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+
+#Load dataset from URL
+url = "https://raw.githubusercontent.com/KeithGalli/pandas/master/pokemon_data.csv"
+df = pd.read_csv(url)
+
+#Inspect columns
+print(df.columns)
+print(df.head())
+
+#Select numeric columns
+numeric_cols = ['Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed', 'HP']
+data = df[numeric_cols].dropna()
+
+
+scaler = StandardScaler()
+X = scaler.fit_transform(data)
+
+print("Scaled data shape:", X.shape)
+from sklearn.neighbors import NearestNeighbors
+import numpy as np
+import matplotlib.pyplot as plt
+
+#Choose min_samples (start with 5)
+min_samples = 5
+
+# Fitting NearestNeighbors to compute distances
+neighbors = NearestNeighbors(n_neighbors=min_samples)
+neighbors_fit = neighbors.fit(X)
+distances, indices = neighbors_fit.kneighbors(X)
+
+#  Sort distances (k-distance)
+distances = np.sort(distances[:, min_samples - 1])  # distances to k-th nearest neighbor
+
+#Plot the elbow curve
+plt.figure(figsize=(8, 5))
+plt.plot(distances)
+plt.title(f'k-Distance Graph (min_samples = {min_samples})')
+plt.xlabel('Points sorted by distance')
+plt.ylabel(f'{min_samples}-th Nearest Neighbor Distance')
+plt.show()
+import numpy as np
+
+def euclidean_distance(a, b):
+    return np.sqrt(np.sum((a - b)**2))
+
+def region_query(X, point_idx, eps):
+    neighbors = []
+    for i in range(len(X)):
+        if euclidean_distance(X[point_idx], X[i]) <= eps:
+            neighbors.append(i)
+    return neighbors
+
+def expand_cluster(X, labels, point_idx, neighbors, cluster_id, eps, min_samples):
+    labels[point_idx] = cluster_id
+    i = 0
+    while i < len(neighbors):
+        neighbor_idx = neighbors[i]
+        if labels[neighbor_idx] == -1:  # Previously noise
+            labels[neighbor_idx] = cluster_id
+        elif labels[neighbor_idx] == 0:  # Unvisited
+            labels[neighbor_idx] = cluster_id
+            new_neighbors = region_query(X, neighbor_idx, eps)
+            if len(new_neighbors) >= min_samples:
+                neighbors += new_neighbors
+        i += 1
+
+def dbscan(X, eps, min_samples):
+    labels = np.zeros(len(X))
+    cluster_id = 0
+
+    for i in range(len(X)):
+        if labels[i] != 0:
+            continue
+
+        neighbors = region_query(X, i, eps)
+        if len(neighbors) < min_samples:
+            labels[i] = -1  # Noise
+        else:
+            cluster_id += 1
+            expand_cluster(X, labels, i, neighbors, cluster_id, eps, min_samples)
+
+    return labels
+
+#DBSCAN
+eps = 0.5
+min_samples = 5
+labels = dbscan(X, eps, min_samples)
+
+print(f"Number of clusters found: {len(set(labels)) - (1 if -1 in labels else 0)}")
+print("Noise points:", list(labels).count(-1))
+
+# Visualize clusters
+plt.figure(figsize=(8,6))
+plt.scatter(X[:, 0], X[:, 1], c=labels, cmap='rainbow', s=30)
+plt.title('DBSCAN Clusters (From Scratch)')
+plt.show()
+
+
+
+USING SKLEARN
+
+
+from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+eps = 0.5
+min_samples = 5
+
+db = DBSCAN(eps=eps, min_samples=min_samples)
+db.fit(X)
+
+
+labels = db.labels_
+
+# Number of clusters (excluding noise)
+n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+n_noise = list(labels).count(-1)
+
+print(f"Number of clusters found: {n_clusters}")
+print(f"Number of noise points: {n_noise}")
+
+
+plt.figure(figsize=(8,6))
+core_mask = labels != -1  # Non-noise points
+plt.scatter(X[core_mask, 0], X[core_mask, 1], c=labels[core_mask], cmap='rainbow', s=30)
+plt.scatter(X[~core_mask, 0], X[~core_mask, 1], c='k', s=10, label='Noise')
+plt.title('DBSCAN Clusters (sklearn)')
+plt.legend()
+plt.show()
