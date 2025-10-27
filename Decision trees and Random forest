@@ -1,0 +1,163 @@
+I WASNT ABLE TO FIND THE FRAUD DETECTION DATA HENCE THE PROGRAMME IS WRITTEN FOR IRIS DATA SET THE LOGICS WILL REMAIN THE SAME(have used a little bit of AI for scratch implementation to check for syntax, formatting and undo errors)
+THE mathematical aspect and logic is understood and written by me
+
+import numpy as np
+import pandas as pd
+from pprint import pprint
+from sklearn.datasets import load_iris
+iris = load_iris()
+df = pd.DataFrame(iris.data, columns=iris.feature_names)
+df['target'] = iris.target
+
+pprint(df.head())import pandas as pd
+import math
+from collections import Counter
+from sklearn.datasets import load_iris
+from pprint import pprint
+import numpy as np
+
+#  Load Iris dataset
+iris = load_iris()
+df = pd.DataFrame(iris.data, columns=iris.feature_names)
+df['target'] = iris.target
+pprint(df.head())
+
+# Entropy function
+def calculate_entropy(labels):
+    label_counts = Counter(labels)
+    total_samples = len(labels)
+    entropy = 0
+    for count in label_counts.values():
+        p_i = count / total_samples
+        entropy -= p_i * math.log2(p_i)
+    return entropy
+
+# Function to calculate Information Gain for a feature
+def information_gain(df, feature, target='target'):
+    # Original entropy before splitting
+    total_entropy = calculate_entropy(df[target])
+
+    # Possible split points (midpoints between sorted unique values)
+    values = sorted(df[feature].unique())
+    split_points = [(values[i] + values[i+1])/2 for i in range(len(values)-1)]
+
+    best_ig = -1
+    best_split = None
+
+    # Check all split points
+    for split in split_points:
+        # Split dataset into two groups
+        left_split = df[df[feature] <= split]
+        right_split = df[df[feature] > split]
+
+        # Weighted entropy after split
+++
+        left_weight = len(left_split) / len(df)
+        right_weight = len(right_split) / len(df)
+        post_entropy = left_weight * calculate_entropy(left_split[target]) + \
+                       right_weight * calculate_entropy(right_split[target])
+
+        # Information Gain
+        ig = total_entropy - post_entropy
+
+        # Keep the best IG and corresponding split point
+        if ig > best_ig:
+            best_ig = ig
+            best_split = split
+
+    return best_ig, best_split
+
+# Compute IG for all features
+feature_igs = {}
+for feature in iris.feature_names:
+    ig, split = information_gain(df, feature)
+    feature_igs[feature] = (ig, split)
+
+# Step 1: Find the feature with highest IG (root node)
+root_feature = max(feature_igs, key=lambda k: feature_igs[k][0])
+root_ig, root_split = feature_igs[root_feature]
+
+print("\nInformation Gain for each feature:")
+for f, (ig, split) in feature_igs.items():
+    print(f"{f}: IG={ig:.4f}, Best Split={split:.2f}")
+
+print(f"\nRoot node should be: '{root_feature}' with IG={root_ig:.4f} at split={root_split:.2f}")
+
+
+FROM SKLEARN (done properly by me)
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+url = "https://raw.githubusercontent.com/mlg-ulb/creditcardfraud/master/creditcard.csv"
+df = pd.read_csv(url)
+
+print("Shape of dataset:", df.shape)
+print(df['Class'].value_counts())
+
+#Feature and Target split
+X = df.drop('Class', axis=1)
+y = df['Class']
+#Train-test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+
+#Decision Tree Model
+dt = DecisionTreeClassifier(
+    criterion='entropy',
+    max_depth=5,
+    random_state=42
+)
+dt.fit(X_train, y_train)
+y_pred_dt = dt.predict(X_test)
+
+#Random Forest Model
+rf = RandomForestClassifier(
+    n_estimators=100,      # number of trees
+    criterion='entropy',   # same splitting criterion
+    max_depth=8,           # slightly deeper trees
+    random_state=42,
+    n_jobs=-1              # use all CPU cores
+)
+rf.fit(X_train, y_train)
+y_pred_rf = rf.predict(X_test)
+
+#Evaluation
+print("\n Decision Tree Report ")
+print("Accuracy:", accuracy_score(y_test, y_pred_dt))
+print(classification_report(y_test, y_pred_dt))
+
+print("\n Random Forest Report ")
+print("Accuracy:", accuracy_score(y_test, y_pred_rf))
+print(classification_report(y_test, y_pred_rf))
+
+# Step 1: Confusion Matrices
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+sns.heatmap(confusion_matrix(y_test, y_pred_dt), annot=True, fmt='d', cmap='Blues', ax=ax[0])
+ax[0].set_title('Decision Tree Confusion Matrix')
+sns.heatmap(confusion_matrix(y_test, y_pred_rf), annot=True, fmt='d', cmap='Greens', ax=ax[1])
+ax[1].set_title('Random Forest Confusion Matrix')
+plt.show()
+
+importances_dt = pd.Series(dt.feature_importances_, index=X.columns)
+importances_rf = pd.Series(rf.feature_importances_, index=X.columns)
+
+# Plot top 10 for Random Forest
+top_features_rf = importances_rf.sort_values(ascending=False)[:10]
+plt.figure(figsize=(8,5))
+sns.barplot(x=top_features_rf.values, y=top_features_rf.index, palette='viridis')
+plt.title("Top 10 Important Features - Random Forest")
+plt.show()
+
+# Visualize Decision Tree (optional)
+plt.figure(figsize=(18,10))
+plot_tree(dt, filled=True, feature_names=X.columns[:10], class_names=['Non-Fraud', 'Fraud'])
+plt.show()
