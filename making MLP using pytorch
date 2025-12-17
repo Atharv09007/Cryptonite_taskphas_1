@@ -1,0 +1,135 @@
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# Loading the dataset
+columns = [
+    "age", "workclass", "fnlwgt", "education", "education-num",
+    "marital-status", "occupation", "relationship", "race", "sex",
+    "capital-gain", "capital-loss", "hours-per-week",
+    "native-country", "income"
+]
+
+data = pd.read_csv(
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data",
+    names=columns,
+    sep=", ",
+    engine="python"
+)
+
+# we had missing data therefore we check the data rows which have the missing value and replace them with true so that we can drop the true
+data.replace("?", np.nan, inplace=True)
+data.dropna(inplace=True)
+
+#0 for less than equal to 50k and rest goes to 1 (astyping)
+data["income"] = data["income"].map({
+    "<=50K": 0,
+    ">50K": 1
+})
+
+#the object data type is given a string vaue like 0 1 2 
+categorical_cols = data.select_dtypes(include="object").columns
+encoder = LabelEncoder()
+
+for col in categorical_cols:
+    data[col] = encoder.fit_transform(data[col])
+
+#features and target
+X = data.drop("income", axis=1).values
+y = data["income"].values
+
+#test train split 
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+#stardarization (mean 0 and deviation of 1)
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+#convert into pytorch tensors
+X_train = torch.tensor(X_train, dtype=torch.float32)
+X_test = torch.tensor(X_test, dtype=torch.float32)
+
+y_train = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)#unsqueeze for extra dimension cuz of loss function
+y_test = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+
+#making the mlp
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(  #container that holds the layers 
+            nn.Linear(14, 64), #dense later with 14 inputs and64 output features 
+            nn.ReLU(), #first activation function
+            nn.Linear(64, 32), #dense layer 2 64 output from prev becomes input of this layer and the output of this are 32
+            nn.ReLU(), #another acrtivation
+            nn.Linear(32, 1), #output layer 
+            nn.Sigmoid() # activation function for binary classifcation 
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+model = MLP()
+
+#loss and optimizer
+criterion = nn.BCELoss() #cross enthalpy 
+optimizer = optim.Adam(model.parameters(), lr=0.001) #adam optimizer to update the models weigths during the training converges faster 
+
+#training 
+epochs = 25
+
+for epoch in range(epochs):
+    model.train()
+
+    outputs = model(X_train) #forward pass
+    loss = criterion(outputs, y_train)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if epoch % 5 == 0:
+        print(f"Epoch {epoch} | Loss: {loss.item():.4f}")
+
+#Evalutation 
+model.eval()
+with torch.no_grad():
+    y_pred_prob = model(X_test)
+
+#threshold
+threshold = 0.35   # lowered due to class imbalance
+y_pred = (y_pred_prob >= threshold).int()
+
+#metrics
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print("\nModel Performance:")
+print("Accuracy is :", accuracy)
+print("Precision is :", precision)
+print("Recall is :", recall)
+print("F1-score is :", f1)
+
+#first 10 examples
+print("\nSample Predictions:")
+print("Actual | Prob(>50K) | Predicted")
+print("--------------------------------")
+
+for i in range(10):
+    actual = ">50K" if y_test[i].item() == 1 else "<=50K"
+    prob = y_pred_prob[i].item()
+    predicted = ">50K" if prob >= threshold else "<=50K"
+
+    print(f"{actual:6} | {prob:.3f}      | {predicted}")
