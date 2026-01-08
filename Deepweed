@@ -1,0 +1,195 @@
+import os
+import shutil
+import random
+
+SOURCE = r"E:\images"      # ✅ FIXED HERE
+TARGET = r"E:\deepweeds"
+TRAIN = os.path.join(TARGET, "train")
+VAL = os.path.join(TARGET, "validation")
+
+os.makedirs(TRAIN, exist_ok=True)
+os.makedirs(VAL, exist_ok=True)
+
+for cls in os.listdir(SOURCE):
+    cls_path = os.path.join(SOURCE, cls)
+    if not os.path.isdir(cls_path):
+        continue
+
+    images = os.listdir(cls_path)
+    random.shuffle(images)
+
+    split = int(0.8 * len(images))
+    train_imgs = images[:split]
+    val_imgs = images[split:]
+
+    os.makedirs(os.path.join(TRAIN, cls), exist_ok=True)
+    os.makedirs(os.path.join(VAL, cls), exist_ok=True)
+
+    for img in train_imgs:
+        shutil.copy(os.path.join(cls_path, img),
+                    os.path.join(TRAIN, cls, img))
+
+    for img in val_imgs:
+        shutil.copy(os.path.join(cls_path, img),
+                    os.path.join(VAL, cls, img))
+
+print("Dataset split completed successfully")
+
+
+
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.applications import MobileNetV2, ResNet50
+from tensorflow.keras.preprocessing import image_dataset_from_directory
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 32
+EPOCHS_TRANSFER = 5      # Transfer learning epochs
+EPOCHS_FINE = 5          # Fine-tuning epochs
+
+# Prevent GPU crash (safe on CPU too)
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
+
+DEEPWEEDS_PATH = r"D:/datasets/deepweeds"
+FER_PATH       = r"D:/datasets/fer"
+
+
+def load_data(dataset_path):
+    train_ds = image_dataset_from_directory(
+        os.path.join(dataset_path, "train"),
+        image_size=IMG_SIZE,
+        batch_size=BATCH_SIZE
+    )
+
+    val_ds = image_dataset_from_directory(
+        os.path.join(dataset_path, "val"),
+        image_size=IMG_SIZE,
+        batch_size=BATCH_SIZE
+    )
+
+    test_ds = image_dataset_from_directory(
+        os.path.join(dataset_path, "test"),
+        image_size=IMG_SIZE,
+        batch_size=BATCH_SIZE,
+        shuffle=False
+    )
+
+    class_names = train_ds.class_names
+
+    # Performance optimization
+    AUTOTUNE = tf.data.AUTOTUNE
+    train_ds = train_ds.prefetch(AUTOTUNE)
+    val_ds   = val_ds.prefetch(AUTOTUNE)
+    test_ds  = test_ds.prefetch(AUTOTUNE)
+
+    return train_ds, val_ds, test_ds, class_names
+
+
+data_augmentation = models.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+    layers.RandomZoom(0.1),
+])
+
+def build_model(base_model, num_classes):
+    base_model.trainable = False  # TRANSFER LEARNING STEP
+
+    model = models.Sequential([
+        data_augmentation,
+        layers.Rescaling(1./255),
+        base_model,
+        layers.GlobalAveragePooling2D(),
+        layers.BatchNormalization(),
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(num_classes, activation='softmax')
+    ])
+
+    return model
+
+
+def train_and_evaluate(name, base_model_fn, dataset_path):
+    print(f"\n================ {name} =================")
+
+    train_ds, val_ds, test_ds, class_names = load_data(dataset_path)
+    num_classes = len(class_names)
+
+    base_model = base_model_fn(
+        weights="imagenet",
+        include_top=False,
+        input_shape=(224, 224, 3)
+    )
+
+    model = build_model(base_model, num_classes)
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    print("\n[INFO] Transfer Learning Phase")
+    model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_TRANSFER)
+
+    print("\n[INFO] Fine Tuning (Unfreezing top layers)")
+    base_model.trainable = True
+
+    for layer in base_model.layers[:-30]:
+        layer.trainable = False
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINE)
+
+    print("\n[INFO] Evaluation on Test Set")
+    y_true = []
+    y_pred = []
+
+    for images, labels in test_ds:
+        preds = model.predict(images)
+        y_true.extend(labels.numpy())
+        y_pred.extend(np.argmax(preds, axis=1))
+
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, target_names=class_names))
+
+    cm = confusion_matrix(y_true, y_pred)
+    print("\nConfusion Matrix:\n", cm)
+
+    plt.figure(figsize=(8, 8))
+    for images, labels in test_ds.take(1):
+        preds = model.predict(images)
+        for i in range(9):
+            ax = plt.subplot(3, 3, i + 1)
+            plt.imshow(images[i].numpy().astype("uint8"))
+            pred_label = class_names[np.argmax(preds[i])]
+            true_label = class_names[labels[i]]
+            plt.title(f"P:{pred_label} | T:{true_label}")
+            plt.axis("off")
+    plt.show()
+
+
+train_and_evaluate(
+    name="DeepWeeds Classification",
+    base_model_fn=MobileNetV2,
+    dataset_path=DEEPWEEDS_PATH
+)
+
+train_and_evaluate(
+    name="Facial Expression Recognition",
+    base_model_fn=ResNet50,
+    dataset_path=FER_PATH
+)
+
+#wasnt able to complete properly in time because i had to understand to make a virtual env to load the dataset the transfer learning and fine tuning aspect is clear i have doubts in directery 
