@@ -2,7 +2,7 @@ import os
 import shutil
 import random
 
-SOURCE = r"E:\images"      # ✅ FIXED HERE
+SOURCE = r"E:\images"      
 TARGET = r"E:\deepweeds"
 TRAIN = os.path.join(TARGET, "train")
 VAL = os.path.join(TARGET, "validation")
