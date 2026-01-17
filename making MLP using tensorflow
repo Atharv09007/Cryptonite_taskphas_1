@@ -1,0 +1,86 @@
+import tensorflow as tf
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+#getting the    coloumns
+columns = [    "age", "workclass", "fnlwgt", "education", "education-num",
+    "marital-status", "occupation", "relationship", "race", "sex",
+    "capital-gain", "capital-loss", "hours-per-week",
+    "native-country", "income"
+]
+#loading dataset 
+data = pd.read_csv(
+    "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data",
+    names=columns,
+    sep=", ",
+    engine="python"
+)
+#we have some misssing values in the dataset therefore we drop any ? i.e. missing values row
+data.replace("?", np.nan, inplace=True)
+data.dropna(inplace=True)
+
+# Encode target
+data["income"] = data["income"].map({
+    "<=50K": 0,
+    ">50K": 1
+})
+categorical_cols = data.select_dtypes(include="object").columns
+encoder = LabelEncoder()
+
+for col in categorical_cols:
+    data[col] = encoder.fit_transform(data[col])
+
+# Features and labels
+X = data.drop("income", axis=1).values
+y = data["income"].values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+#scaling the dataset(x-x.mean/x.std)
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+#main model
+model = tf.keras.Sequential([
+    tf.keras.layers.Dense(64, activation='relu', input_shape=(14,)), #first l;ayer with relu activtion function and 64 neurons 
+    tf.keras.layers.Dense(32, activation='relu'),
+    tf.keras.layers.Dense(1, activation='sigmoid') #output layer with sigmoid activation
+])
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), #used adam cuz it takes into consideration of the previous moments 
+    loss=tf.keras.losses.BinaryCrossentropy(),
+    metrics=['accuracy']
+)
+history = model.fit(
+    X_train,
+    y_train,
+    epochs=25,
+    batch_size=32,
+    verbose=1
+)
+y_pred_prob = model.predict(X_test)
+
+threshold = 0.35 #classes are not balance therefore cant thake 50 percent and many >50k gets predicted as <50k)
+y_pred = (y_pred_prob >= threshold).astype(int) #converts model probabilities into binary class predictions using a decision threshold
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+print("Model Performance:")
+print("Accuracy is ", accuracy)
+print("Precision is ", precision)
+print("Recall is ", recall)
+print("F1-score is ", f1)
+print("\nSample Predictions")
+print("Actual | Prob(>50K) | Predicted")
+
+for i in range(10):
+    actual = ">50K" if y_test[i] == 1 else "<=50K"
+    prob = y_pred_prob[i][0]
+    predicted = ">50K" if prob >= threshold else "<=50K"
+
+    print(f"{actual:6} | {prob:.3f}      | {predicted}")
