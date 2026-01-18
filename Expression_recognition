@@ -25,7 +25,7 @@ fine_tune_epochs = 5
 fer_path = r"E:/fer"
 
 # load training dataset
-train_ds = image_dataset_from_directory(
+train_ds = image_dataset_from_directory(  #generalized where img is stored (image_dataset_from_directry)
     os.path.join(fer_path, "train"),
     image_size=img_size,
     batch_size=batch_size
