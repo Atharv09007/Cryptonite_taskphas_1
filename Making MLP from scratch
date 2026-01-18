@@ -32,7 +32,8 @@ y_test_s = (y_test - y_mean) / y_std
 #Initialization (using HE)
 np.random.seed(1)
 
-W1 = np.random.randn(11, 16) * np.sqrt(2 / 11) #he initializing 11 - number of inputs 2 since 50 percent of the values gets removed
+W1 = np.random.randn(11, 16) * np.sqrt(2 / 11) #he initializing 11 - number of inputs 2 since 50 percent of the values gets removed Dense(128, activation='relu' kernel_initializer='he_normal')
+
 b1 = np.zeros((1, 16))
 
 W2 = np.random.randn(16, 8) * np.sqrt(2 / 16)
