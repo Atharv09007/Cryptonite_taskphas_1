@@ -1,0 +1,66 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.linear_model import LinearRegression
+from datetime import datetime
+
+# 1. LOAD / GENERATE DATASET
+# Manipal's climate over 20 years (2004-2024)
+np.random.seed(42)
+years = np.arange(2004, 2025)
+months = np.arange(1, 13)
+data = []
+
+for year in years:
+    for month in months:
+        # Seasonality logic for Manipal (Monsoon peaks in July)
+        temp = 27 + 0.05 * (year - 2004) + np.random.normal(0, 1) # Slight upward trend
+        if month in [6, 7, 8, 9]: # Monsoon
+            precip = np.random.uniform(500, 1000) + 2 * (year - 2004)
+        else:
+            precip = np.random.uniform(0, 50)
+        
+        data.append([year, month, temp, precip])
+
+df = pd.DataFrame(data, columns=['Year', 'Month', 'AvgTemp', 'Precipitation'])
+df['Date'] = pd.to_datetime(df[['Year', 'Month']].assign(Day=1))
+
+# 2. SEASONALITY ANALYSIS
+plt.figure(figsize=(12, 5))
+sns.lineplot(data=df, x='Month', y='Precipitation', ci='sd', color='blue')
+plt.title('Seasonality Pattern: Average Monthly Precipitation in Manipal')
+plt.xticks(range(1, 13))
+plt.grid(True)
+plt.show()
+
+# 3. TREND MODELING
+def quantify_trend(feature):
+    # Prepare data for Linear Regression
+    yearly_avg = df.groupby('Year')[feature].mean().reset_index()
+    X = yearly_avg[['Year']].values
+    y = yearly_avg[feature].values
+    
+    model = LinearRegression()
+    model.fit(X, y)
+    trend = model.coef_[0]
+    
+    # Plotting
+    plt.figure(figsize=(10, 4))
+    plt.scatter(X, y, color='black', label='Observed Data')
+    plt.plot(X, model.predict(X), color='red', linewidth=2, label=f'Trend: {trend:.4f} units/year')
+    plt.title(f'Climate Change Trend: {feature} over Time')
+    plt.xlabel('Year')
+    plt.ylabel(feature)
+    plt.legend()
+    plt.show()
+    
+    return trend
+
+# Run models
+temp_trend = quantify_trend('AvgTemp')
+precip_trend = quantify_trend('Precipitation')
+
+print(f"--- Insights ---")
+print(f"Temperature Trend: {temp_trend:.4f} °C increase per year.")
+print(f"Precipitation Trend: {precip_trend:.4f} mm change per year.")
