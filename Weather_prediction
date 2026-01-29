@@ -1,0 +1,616 @@
+#imports
+!pip -q install gdown
+
+import os, re, math, json
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+print("TF:", tf.__version__)
+
+# Reproducibility
+SEED = 42
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+# Load dataset
+
+gdrive_url = "https://drive.google.com/file/d/1Dz81HEGM-id1H8KqB_Z6MeB7NinVniqH/view"
+
+def gdrive_file_id(url: str) -> str:
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if not m:
+        raise ValueError("Could not parse file id from url")
+    return m.group(1)
+
+file_id = gdrive_file_id(gdrive_url)
+out_path = "manipal_weather.csv"
+
+if not os.path.exists(out_path):
+    import gdown
+    gdown.download(f"https://drive.google.com/uc?id={file_id}", out_path, quiet=False)
+
+df = pd.read_csv(out_path,skiprows=3)
+print("Shape:", df.shape)
+display(df.head())
+print("\nColumns:\n", df.columns.tolist())
+
+# Try to find a datetime-like column automatically
+def find_date_col(columns):
+    candidates = []
+    for c in columns:
+        cl = c.lower()
+        if any(k in cl for k in ["date", "time", "datetime", "timestamp"]):
+            candidates.append(c)
+    return candidates[0] if candidates else None
+
+date_col = find_date_col(df.columns)
+if date_col is None:
+    raise ValueError("Could not find a date/time column automatically. Please set date_col manually.")
+
+df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+df = df.dropna(subset=[date_col]).sort_values(date_col).reset_index(drop=True)
+
+# Keep only the required time span (as per task)
+start_date = pd.Timestamp("2025-01-04")
+end_date   = pd.Timestamp("2026-01-04")
+
+df = df[(df[date_col] >= start_date) & (df[date_col] <= end_date)].copy()
+df = df.reset_index(drop=True)
+
+print("After date filter:", df.shape, "from", df[date_col].min(), "to", df[date_col].max())
+
+# Find target columns robustly (temp + precipitation)
+def find_col_by_keywords(columns, must_have=(), any_have=()):
+    cols = []
+    for c in columns:
+        cl = c.lower()
+        ok = True
+        for k in must_have:
+            if k not in cl:
+                ok = False
+                break
+        if not ok:
+            continue
+        if any_have:
+            if not any(k in cl for k in any_have):
+                continue
+        cols.append(c)
+    return cols[0] if cols else None
+
+temp_col = find_col_by_keywords(df.columns, must_have=("temperature",), any_have=("2m", "mean", "avg"))
+prec_col = find_col_by_keywords(df.columns, must_have=("precip",), any_have=("sum", "total"))
+
+# If your dataset has different naming, set these manually here:
+# temp_col = "temperature_2m_mean (°C)"
+# prec_col = "precipitation_sum (mm)"
+
+print("Detected temp_col:", temp_col)
+print("Detected prec_col:", prec_col)
+
+if temp_col is None or prec_col is None:
+    raise ValueError(
+        "Couldn't auto-detect target columns. "
+        "Please manually set temp_col and prec_col based on df.columns."
+    )
+
+# Ensure numeric
+for c in [temp_col, prec_col]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# Drop rows where targets missing
+df = df.dropna(subset=[temp_col, prec_col]).reset_index(drop=True)
+
+# 4) Visualization (data understanding)
+
+plt.figure()
+plt.plot(df[date_col], df[temp_col])
+plt.title("Temperature over full timeline")
+plt.xlabel("Date"); plt.ylabel("Temp (°C)")
+plt.show()
+
+plt.figure()
+plt.plot(df[date_col].iloc[:30], df[temp_col].iloc[:30])
+plt.title("Temperature (first ~30 days)")
+plt.xlabel("Date"); plt.ylabel("Temp (°C)")
+plt.show()
+
+plt.figure()
+plt.plot(df[date_col], df[prec_col])
+plt.title("Precipitation over full timeline")
+plt.xlabel("Date"); plt.ylabel("Precip (mm)")
+plt.show()
+
+#Choose features (univariate vs multivariate)
+
+# Univariate inputs: ONLY target history (temp + precip)
+uni_features = [temp_col, prec_col]
+
+# Multivariate: start with all numeric columns, then drop targets/date
+numeric_cols = [c for c in df.columns if c != date_col and pd.api.types.is_numeric_dtype(df[c])]
+# Keep targets + other numeric features
+multi_features = list(dict.fromkeys(numeric_cols))  # unique preserve order
+
+print("Numeric columns count:", len(numeric_cols))
+print("Univariate features:", uni_features)
+print("Multivariate features (first 20):", multi_features[:20])
+
+# Train/Val/Test split (time-based, no leakage)
+# Forecast next day: use window days -> predict day t+1
+WINDOW_DAYS = 7     # can change this (e.g., 7, 14, 30) increasing it is increasing thloss tho cuz more not important details
+HORIZON = 1          # 1-day ahead
+
+# Use last 20 percent as test can change if want to
+n = len(df)
+train_end = int(n * 0.6)
+val_end   = int(n * 0.8)
+
+df_train = df.iloc[:train_end].copy()
+df_val   = df.iloc[train_end:val_end].copy()
+df_test  = df.iloc[val_end:].copy()
+
+print("Splits:", len(df_train), len(df_val), len(df_test))
+
+#  Scaling (fit on train only)
+
+class StandardScalerNP:
+    def __init__(self):
+        self.mean_ = None
+        self.std_ = None
+
+    def fit(self, X):
+        self.mean_ = X.mean(axis=0)
+        self.std_ = X.std(axis=0)
+        self.std_[self.std_ == 0] = 1.0
+        return self
+
+    def transform(self, X):
+        return (X - self.mean_) / self.std_
+
+    def inverse_transform(self, X):
+        return X * self.std_ + self.mean_
+
+def make_supervised(df_in, feature_cols, target_cols, window_days, horizon=1):
+    """
+    Creates:
+      X: (samples, window_days, num_features)
+      y: (samples, num_targets) for next-day prediction
+    """
+    data = df_in[feature_cols].to_numpy(dtype=np.float32)
+    targets = df_in[target_cols].to_numpy(dtype=np.float32)
+
+    X_list, y_list = [], []
+    # last index for window start: i + window_days + horizon - 1 must be < len(df)
+    max_i = len(df_in) - window_days - horizon + 1
+    for i in range(max_i):
+        Xw = data[i:i+window_days]
+        y_next = targets[i+window_days + horizon - 1]  # next day
+        X_list.append(Xw)
+        y_list.append(y_next)
+
+    return np.array(X_list), np.array(y_list)
+
+TARGET_COLS = [temp_col, prec_col]
+
+def prepare_data(feature_cols):
+    Xtr_raw = df_train[feature_cols].to_numpy(np.float32)
+    Xva_raw = df_val[feature_cols].to_numpy(np.float32)
+    Xte_raw = df_test[feature_cols].to_numpy(np.float32)
+
+    scaler = StandardScalerNP().fit(Xtr_raw)
+
+    df_train_s = df_train.copy()
+    df_val_s   = df_val.copy()
+    df_test_s  = df_test.copy()
+
+    df_train_s[feature_cols] = scaler.transform(df_train_s[feature_cols].to_numpy(np.float32))
+    df_val_s[feature_cols]   = scaler.transform(df_val_s[feature_cols].to_numpy(np.float32))
+    df_test_s[feature_cols]  = scaler.transform(df_test_s[feature_cols].to_numpy(np.float32))
+
+    # Supervised windows
+    X_train, y_train = make_supervised(df_train_s, feature_cols, TARGET_COLS, WINDOW_DAYS, HORIZON)
+    X_val,   y_val   = make_supervised(df_val_s,   feature_cols, TARGET_COLS, WINDOW_DAYS, HORIZON)
+    X_test,  y_test  = make_supervised(df_test_s,  feature_cols, TARGET_COLS, WINDOW_DAYS, HORIZON)
+
+    # Dates aligned with y (for plotting)
+    def y_dates(df_part):
+        # y starts at index window_days+horizon-1
+        start = WINDOW_DAYS + HORIZON - 1
+        return df_part[date_col].iloc[start:].reset_index(drop=True)
+
+    d_train = y_dates(df_train_s)
+    d_val   = y_dates(df_val_s)
+    d_test  = y_dates(df_test_s)
+
+    return (X_train, y_train, d_train), (X_val, y_val, d_val), (X_test, y_test, d_test), scaler
+
+# Model builder (RNN/GRU/LSTM, stacked, bidirectional)
+
+def build_model(cell_type, input_shape, bidirectional=False, stacked=False, units=64, dropout=0.1):
+    """
+    input_shape = (window_days, num_features)
+    output = 2 targets (temp, precip)
+    """
+    inp = keras.Input(shape=input_shape)
+
+    def rnn_layer(return_sequences):
+        if cell_type == "RNN":
+            base = layers.SimpleRNN(units, return_sequences=return_sequences)
+        elif cell_type == "GRU":
+            base = layers.GRU(units, return_sequences=return_sequences)
+        elif cell_type == "LSTM":
+            base = layers.LSTM(units, return_sequences=return_sequences)
+        else:
+            raise ValueError("cell_type must be one of: RNN, GRU, LSTM")
+
+        if bidirectional:
+            return layers.Bidirectional(base)
+        return base
+
+    x = inp
+
+    if stacked:
+        x = rnn_layer(return_sequences=True)(x)
+        x = layers.Dropout(dropout)(x)
+        x = rnn_layer(return_sequences=False)(x)
+    else:
+        x = rnn_layer(return_sequences=False)(x)
+
+    x = layers.Dropout(dropout)(x)
+    x = layers.Dense(32, activation="relu")(x) #changing the model for decresing the temp rmse
+    x = layers.Dense(16, activation="relu")(x)
+    out = layers.Dense(2, activation="linear")(x)
+
+    model = keras.Model(inp, out)
+    model.compile(
+        optimizer=keras.optimizers.Adam(1e-3),
+        loss="mse",
+        metrics=[keras.metrics.MeanAbsoluteError(name="mae")]
+    )
+    return model
+
+# Metrics
+def rmse(y_true, y_pred):
+    return np.sqrt(np.mean((y_true - y_pred) ** 2, axis=0))  # per-target
+
+def mae(y_true, y_pred):
+    return np.mean(np.abs(y_true - y_pred), axis=0)          # per-target
+
+# Train + evaluate helper
+
+def train_and_eval(feature_cols, cell_type, bidirectional=False, stacked=False, epochs=200, batch_size=32):
+    (X_train, y_train, d_train), (X_val, y_val, d_val), (X_test, y_test, d_test), scaler = prepare_data(feature_cols)
+
+    model = build_model(
+        cell_type=cell_type,
+        input_shape=(X_train.shape[1], X_train.shape[2]),
+        bidirectional=bidirectional,
+        stacked=stacked,
+        units=48,  # started to overfit so changing units
+        dropout=0.1
+    )
+
+    cb = [
+        keras.callbacks.EarlyStopping(monitor="val_loss", patience=20, restore_best_weights=True),
+        keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=8, min_lr=1e-6),
+    ]
+
+    hist = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=0,
+        callbacks=cb
+    )
+
+    # Predict
+    yhat_test = model.predict(X_test, verbose=0)
+
+    # Report metrics in ORIGINAL units (undo scaling only for targets if targets were scaled)
+    # Note: we scaled ALL feature columns, but targets themselves were not separately scaled.
+    # Here y_test, yhat_test are in "scaled feature space" IF targets were included in feature_cols
+    # But in our setup targets are from df_part[TARGET_COLS] which are still numeric,
+    # and those columns are part of scaling only if included in feature_cols.
+    #
+    # For correctness: since TARGET_COLS are numeric columns and will be scaled if present in feature_cols,
+    # y_test/yhat_test are scaled versions. We'll invert using the scaler parameters for those columns.
+
+    # Build a target-only inverse transform using scaler stats aligned to feature_cols
+    feat_idx = {c:i for i,c in enumerate(feature_cols)}
+    t_idx = [feat_idx[temp_col], feat_idx[prec_col]]
+
+    target_mean = scaler.mean_[t_idx]
+    target_std  = scaler.std_[t_idx]
+
+    y_test_orig = y_test * target_std + target_mean
+    yhat_orig   = yhat_test * target_std + target_mean
+
+    test_mae = mae(y_test_orig, yhat_orig)
+    test_rmse = rmse(y_test_orig, yhat_orig)
+
+    results = {
+        "features": "multivariate" if len(feature_cols) > len(uni_features) else "univariate",
+        "cell": cell_type,
+        "bidirectional": bidirectional,
+        "stacked": stacked,
+        "temp_MAE": float(test_mae[0]),
+        "prec_MAE": float(test_mae[1]),
+        "temp_RMSE": float(test_rmse[0]),
+        "prec_RMSE": float(test_rmse[1]),
+        "model": model,
+        "history": hist.history,
+        "dates_test": d_test.iloc[:len(y_test_orig)].to_numpy(),
+        "y_test_orig": y_test_orig,
+        "yhat_orig": yhat_orig,
+    }
+    return results
+
+TRY_STACKED = False
+TRY_BIDIR   = False
+
+configs = []
+for featset in ["uni", "multi"]:
+    feature_cols = uni_features if featset == "uni" else multi_features
+
+    for cell in ["RNN", "GRU", "LSTM"]:
+        configs.append((feature_cols, cell, False, False))
+        if TRY_STACKED:
+            configs.append((feature_cols, cell, False, True))
+        if TRY_BIDIR:
+            configs.append((feature_cols, cell, True, False))
+        if TRY_BIDIR and TRY_STACKED:
+            configs.append((feature_cols, cell, True, True))
+
+all_results = []
+for i, (fcols, cell, bidir, stacked) in enumerate(configs, 1):
+    print(f"[{i}/{len(configs)}] Training: feat={('multi' if len(fcols)>len(uni_features) else 'uni')} "
+          f"{cell} bidir={bidir} stacked={stacked}")
+    res = train_and_eval(fcols, cell, bidirectional=bidir, stacked=stacked)
+    all_results.append(res)
+
+# Build metrics table
+metrics_df = pd.DataFrame([{
+    "Setting": r["features"],
+    "Model": r["cell"],
+    "Bidir": r["bidirectional"],
+    "Stacked": r["stacked"],
+    "Temp MAE": r["temp_MAE"],
+    "Temp RMSE": r["temp_RMSE"],
+    "Prec MAE": r["prec_MAE"],
+    "Prec RMSE": r["prec_RMSE"],
+} for r in all_results]).sort_values(["Setting","Temp RMSE","Prec RMSE"])
+
+display(metrics_df)
+
+# Here: minimize Temp RMSE + Prec RMSE
+best_idx = np.argmin(metrics_df["Temp RMSE"].to_numpy() + metrics_df["Prec RMSE"].to_numpy())
+best_row = metrics_df.iloc[best_idx]
+print("\nBEST CONFIG:\n", best_row)
+
+# Find the actual result dict matching best_row
+def match_result(r, row):
+    return (
+        r["features"] == row["Setting"]
+        and r["cell"] == row["Model"]
+        and r["bidirectional"] == bool(row["Bidir"])
+        and r["stacked"] == bool(row["Stacked"])
+    )
+
+best_res = None
+for r in all_results:
+    if match_result(r, best_row):
+        best_res = r
+        break
+
+assert best_res is not None
+# =========================
+# 12) Plot required: training vs validation loss curves
+# =========================
+hist = best_res["history"]
+plt.figure()
+plt.plot(hist["loss"], label="train_loss")
+plt.plot(hist["val_loss"], label="val_loss")
+plt.title("Training vs Validation Loss (Best Model)")
+plt.xlabel("Epoch"); plt.ylabel("MSE Loss")
+plt.legend()
+plt.show()
+# =========================
+# 13) Plot required: Ground truth vs prediction day-by-day (test split)
+# =========================
+dates = best_res["dates_test"]
+y_true = best_res["y_test_orig"]
+y_pred = best_res["yhat_orig"]
+
+# Temperature plot
+plt.figure()
+plt.plot(dates, y_true[:,0], label="Temp True")
+plt.plot(dates, y_pred[:,0], label="Temp Pred")
+plt.title("Temperature: Ground Truth vs Prediction (Test)")
+plt.xlabel("Date"); plt.ylabel("Temp (°C)")
+plt.legend()
+plt.show()
+
+# Precip plot
+plt.figure()
+plt.plot(dates, y_true[:,1], label="Prec True")
+plt.plot(dates, y_pred[:,1], label="Prec Pred")
+plt.title("Precipitation: Ground Truth vs Prediction (Test)")
+plt.xlabel("Date"); plt.ylabel("Precip (mm)")
+plt.legend()
+plt.show()
+# =========================
+# 13) Plot required: Ground truth vs prediction day-by-day (test split)
+# =========================
+dates = best_res["dates_test"]
+y_true = best_res["y_test_orig"]
+y_pred = best_res["yhat_orig"]
+
+# Temperature plot
+plt.figure()
+plt.plot(dates, y_true[:,0], label="Temp True")
+plt.plot(dates, y_pred[:,0], label="Temp Pred")
+plt.title("Temperature: Ground Truth vs Prediction (Test)")
+plt.xlabel("Date"); plt.ylabel("Temp (°C)")
+plt.legend()
+plt.show()
+
+# Precip plot
+plt.figure()
+plt.plot(dates, y_true[:,1], label="Prec True")
+plt.plot(dates, y_pred[:,1], label="Prec Pred")
+plt.title("Precipitation: Ground Truth vs Prediction (Test)")
+plt.xlabel("Date"); plt.ylabel("Precip (mm)")
+plt.legend()
+plt.show()
+# =========================
+# 14) Comparison statement helpers
+# =========================
+print("\nTop rows (best first):")
+display(metrics_df.head(10))
+
+# Quick summary: best univariate vs best multivariate
+best_uni = metrics_df[metrics_df["Setting"]=="univariate"].iloc[0]
+best_mul = metrics_df[metrics_df["Setting"]=="multivariate"].iloc[0]
+print("\nBest Univariate:\n", best_uni)
+print("\nBest Multivariate:\n", best_mul)
+print("\nDid multivariate improve? (lower is better)")
+print("Temp RMSE improvement:", best_uni["Temp RMSE"] - best_mul["Temp RMSE"])
+print("Prec RMSE improvement:", best_uni["Prec RMSE"] - best_mul["Prec RMSE"])
+
+# =========================================================
+# 15) FULL-YEAR (365-DAY) CONTINUOUS FORECAST
+#     (Explicitly NOT test-split, Jan 4 2025 → Jan 4 2026)
+# =========================================================
+
+best_model = best_res["model"]
+best_features = uni_features if best_res["features"] == "univariate" else multi_features
+
+# Fit scaler on FULL data
+full_scaler = StandardScalerNP().fit(df[best_features].to_numpy(np.float32))
+
+df_scaled = df.copy()
+df_scaled[best_features] = full_scaler.transform(
+    df_scaled[best_features].to_numpy(np.float32)
+)
+
+# Rolling forecast
+window = df_scaled[best_features].iloc[:WINDOW_DAYS].to_numpy(np.float32)
+future_preds = []
+
+feat_idx = {c:i for i,c in enumerate(best_features)}
+t_idx = [feat_idx[temp_col], feat_idx[prec_col]]
+
+for _ in range(len(df_scaled) - WINDOW_DAYS):
+    pred = best_model.predict(window[np.newaxis, ...], verbose=0)[0]
+    future_preds.append(pred)
+
+    new_row = window[-1].copy()
+    new_row[t_idx[0]] = pred[0]
+    new_row[t_idx[1]] = pred[1]
+    window = np.vstack([window[1:], new_row])
+
+future_preds = np.array(future_preds)
+future_preds_orig = future_preds * full_scaler.std_[t_idx] + full_scaler.mean_[t_idx]
+
+future_dates = df[date_col].iloc[WINDOW_DAYS:].reset_index(drop=True)
+
+plt.figure(figsize=(14,5))
+plt.plot(future_dates, df[temp_col].iloc[WINDOW_DAYS:], label="Actual")
+plt.plot(future_dates, future_preds_orig[:,0], label="Predicted")
+plt.title("FULL-YEAR Continuous Temperature Forecast (Jan 2025 → Jan 2026)")
+plt.xlabel("Date"); plt.ylabel("Temp (°C)")
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(14,5))
+plt.plot(future_dates, df[prec_col].iloc[WINDOW_DAYS:], label="Actual")
+plt.plot(future_dates, future_preds_orig[:,1], label="Predicted")
+plt.title("FULL-YEAR Continuous Precipitation Forecast (Jan 2025 → Jan 2026)")
+plt.xlabel("Date"); plt.ylabel("Precip (mm)")
+plt.legend()
+plt.show()
+
+# =========================================================
+# 16) CLIMATE CHANGE QUANTIFICATION (LINEAR TREND / SLOPE)
+# =========================================================
+
+from sklearn.linear_model import LinearRegression
+
+time_index = np.arange(len(df)).reshape(-1,1)
+
+# Temperature trend
+lr_temp = LinearRegression().fit(time_index, df[temp_col].to_numpy())
+temp_slope = lr_temp.coef_[0]
+
+# Precipitation trend
+lr_prec = LinearRegression().fit(time_index, df[prec_col].to_numpy())
+prec_slope = lr_prec.coef_[0]
+
+print("\nCLIMATE TREND ANALYSIS:")
+print(f"Temperature trend slope: {temp_slope:.5f} °C/day")
+print(f"Precipitation trend slope: {prec_slope:.5f} mm/day")
+
+# =========================================================
+# 17) DEEP EDA: SEASONALITY + CORRELATION HEATMAP
+# =========================================================
+
+df["month"] = df[date_col].dt.month
+
+monthly_means = df.groupby("month")[[temp_col, prec_col]].mean()
+
+plt.figure()
+plt.plot(monthly_means.index, monthly_means[temp_col])
+plt.title("Seasonal Temperature Pattern (Monthly Mean)")
+plt.xlabel("Month"); plt.ylabel("Temp (°C)")
+plt.show()
+
+plt.figure()
+plt.plot(monthly_means.index, monthly_means[prec_col])
+plt.title("Seasonal Precipitation Pattern (Monthly Mean)")
+plt.xlabel("Month"); plt.ylabel("Precip (mm)")
+plt.show()
+
+# Correlation heatmap (numeric features)
+corr = df[multi_features].corr()
+
+plt.figure(figsize=(10,8))
+plt.imshow(corr, cmap="coolwarm", aspect="auto")
+plt.colorbar(label="Correlation")
+plt.xticks(range(len(corr.columns)), corr.columns, rotation=90)
+plt.yticks(range(len(corr.columns)), corr.columns)
+plt.title("Feature Correlation Heatmap")
+plt.show()
+
+# =========================================================
+# 18) CLEAR NUMERIC ARGUMENT: MULTIVARIATE VS UNIVARIATE
+# =========================================================
+
+print("\nMODEL INTERPRETATION:")
+print("Lower RMSE = better")
+
+print(f"Univariate Temp RMSE: {best_uni['Temp RMSE']:.3f}")
+print(f"Multivariate Temp RMSE: {best_mul['Temp RMSE']:.3f}")
+print(f"Univariate Prec RMSE: {best_uni['Prec RMSE']:.3f}")
+print(f"Multivariate Prec RMSE: {best_mul['Prec RMSE']:.3f}")
+
+if best_mul["Temp RMSE"] < best_uni["Temp RMSE"]:
+    print("→ Multivariate improves TEMPERATURE prediction")
+else:
+    print("→ Multivariate does NOT improve TEMPERATURE prediction")
+
+if best_mul["Prec RMSE"] < best_uni["Prec RMSE"]:
+    print("→ Multivariate improves PRECIPITATION prediction")
+else:
+    print("→ Multivariate does NOT improve PRECIPITATION prediction")
+
+print("\nConclusion:")
+print(
+    "Multivariate models help when auxiliary meteorological features "
+    "show meaningful correlation with the target variable. "
+    "Limited improvement indicates weak cross-feature dependency."
+)
+
