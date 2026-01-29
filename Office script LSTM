@@ -1,0 +1,118 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense
+from tensorflow.keras.optimizers import Adam
+import math
+import re
+from google.colab import files
+files.upload()
+
+# Load text
+with open("office_script_clean.txt", "r", encoding="utf-8") as f:
+    text = f.read()
+
+print("Total characters:", len(text))
+
+def preprocess_text(text):
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r'[^\x00-\x7F]+', '', text)   # remove non-ASCII
+    text = text.replace("\t", " ")
+    text = re.sub(r' +', ' ', text)             # collapse spaces
+    text = re.sub(r'\n{3,}', '\n\n', text)      # collapse newlines
+    return text.strip()
+with open("office_script_clean.txt", "r", encoding="utf-8") as f:
+    text = f.read()
+
+text = preprocess_text(text)
+
+print("Total characters:", len(text))
+chars = sorted(list(set(text)))
+vocab_size = len(chars)
+
+char2idx = {c: i for i, c in enumerate(chars)}
+idx2char = {i: c for c, i in char2idx.items()}
+
+print("Vocabulary size:", vocab_size)
+
+SEQ_LEN = 40   # context length (between 80 - 120)
+
+X = []
+y = []
+
+for i in range(len(text) - SEQ_LEN):
+    X.append([char2idx[c] for c in text[i:i+SEQ_LEN]])
+    y.append(char2idx[text[i+SEQ_LEN]])
+
+X = np.array(X)
+y = np.array(y)
+
+print("Input shape:", X.shape)
+
+split = int(0.9 * len(X))
+
+X_train, X_val = X[:split], X[split:]
+y_train, y_val = y[:split], y[split:]
+
+model = Sequential([
+    Embedding(
+        input_dim=vocab_size,
+        output_dim=64,        # embedding size
+        input_length=SEQ_LEN
+    ),
+    LSTM(128,dropout=0.2, recurrent_dropout=0.2),
+    Dense(vocab_size, activation="softmax")
+])
+
+model.compile(
+    optimizer=Adam(learning_rate=0.001),
+    loss="sparse_categorical_crossentropy"
+)
+
+model.summary()
+
+history = model.fit(
+    X_train, y_train,
+    validation_data=(X_val, y_val),
+    epochs=5,  #for working me model otherwise 25 epochs 
+    batch_size=128
+)
+
+def perplexity(loss):
+    return math.exp(loss)
+
+train_loss = history.history["loss"][-1]
+val_loss = history.history["val_loss"][-1]
+
+print("Train Perplexity:", perplexity(train_loss))
+print("Validation Perplexity:", perplexity(val_loss))
+
+#USING GPT
+def sample(preds, temperature=1.0):
+    preds = np.asarray(preds).astype("float64")
+    preds = np.log(preds + 1e-8) / temperature
+    exp_preds = np.exp(preds)
+    probs = exp_preds / np.sum(exp_preds)
+    return np.random.choice(len(probs), p=probs)
+
+def generate_script(seed_text, temperature=0.7, num_tokens=300):
+    generated = seed_text
+
+    for _ in range(num_tokens):
+        seq = generated[-SEQ_LEN:]
+        seq_encoded = np.array([[char2idx[c] for c in seq]])
+
+        preds = model.predict(seq_encoded, verbose=0)[0]
+        next_idx = sample(preds, temperature)
+        next_char = idx2char[next_idx]
+
+        generated += next_char
+
+    return generated
+seed = "MICHAEL: I just want to say"
+
+for temp in [0.3, 0.7, 1.0]:
+    print("\n==============================")
+    print("Temperature:", temp)
+    print("==============================")
+    print(generate_script(seed, temperature=temp))
